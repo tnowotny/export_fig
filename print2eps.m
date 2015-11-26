@@ -247,7 +247,6 @@ function print2eps(name, fig, export_options, varargin)
 
     % Print to eps file
     print(fig, options{:}, name);
-
     % Do post-processing on the eps file
     try
         % Read the EPS file into memory
@@ -255,40 +254,47 @@ function print2eps(name, fig, export_options, varargin)
     catch
         fstrm = '';
     end
-    
-    % Restore colors for transparent patches and apply the
-    % setopacityalpha setting in the EPS file (issue #108)
-    if using_hg2
-        [~,fstrm] = eps_maintainAlpha(fig, fstrm, origAlphaColors);
-    end
-    
+   
     % Fix for Matlab R2014b bug (issue #31): LineWidths<0.75 are not set in the EPS (default line width is used)
+    
     try
-        if ~isempty(fstrm) && using_hg2(fig)
-            % Convert miter joins to line joins
-            %fstrm = regexprep(fstrm, '\n10.0 ML\n', '\n1 LJ\n');
-            % This is faster (the original regexprep could take many seconds when the axes contains many lines):
-            fstrm = strrep(fstrm, sprintf('\n10.0 ML\n'), sprintf('\n1 LJ\n'));
-
+      if ~isempty(fstrm) && using_hg2(fig)
             % In HG2, grid lines and axes Ruler Axles have a default LineWidth of 0.5 => replace en-bulk (assume that 1.0 LineWidth = 1.333 LW)
             %   hAxes=gca; hAxes.YGridHandle.LineWidth, hAxes.YRuler.Axle.LineWidth
             %fstrm = regexprep(fstrm, '(GC\n2 setlinecap\n1 LJ)\nN', '$1\n0.667 LW\nN');
             % This is faster:
-            fstrm = strrep(fstrm, sprintf('GC\n2 setlinecap\n1 LJ\nN'), sprintf('GC\n2 setlinecap\n1 LJ\n0.667 LW\nN'));
+            %fstrm = strrep(fstrm, sprintf('GC\n2 setlinecap\n1 LJ\nN'), sprintf('GC\n2 setlinecap\n1 LJ\n0.667 LW\nN'));
 
             % This is more accurate but *MUCH* slower (issue #52)
-            %{
-            % Modify all thin lines in the figure to have 10x LineWidths
+            
+            % Modify all thin lines in the figure to have LineWidths x.42
+            % where x is an index to the actual line width and '42' a
+            % marker that this line has been manipulated. The replace the
+            % x.42 patterns in the eps file by the correct line
+            % widths. This will fail if by bad luck some line has actual
+            % with of something.42
             hLines = findall(fig,'Type','line');
+            lineWd = [];
+            lwdN= 0;
+            lineWdIdx= [];
             hThinLines = [];
             for lineIdx = 1 : numel(hLines)
                 thisLine = hLines(lineIdx);
                 if thisLine.LineWidth < 0.75 && strcmpi(thisLine.Visible,'on')
-                    hThinLines(end+1) = thisLine; %#ok<AGROW>
-                    thisLine.LineWidth = thisLine.LineWidth * 10;
+                    tmp= thisLine.LineWidth;
+                    pos= find(lineWd == tmp);
+                    if isempty(pos) 
+                        lwdN= lwdN+1;
+                        lineWd(lwdN)= tmp;
+                        lineWdIdx(end+1)= lwdN;
+                        pos= lwdN;
+                    else
+                        lineWdIdx(end+1)= pos;
+                    end
+                    hThinLines(end+1) = thisLine; 
+                    thisLine.LineWidth = pos+0.42; % works for up to 99 line widths
                 end
             end
-
             % If any thin lines were found
             if ~isempty(hThinLines)
                 % Prepare an EPS with large-enough line widths
@@ -296,42 +302,39 @@ function print2eps(name, fig, export_options, varargin)
                 % Restore the original LineWidths in the figure
                 for lineIdx = 1 : numel(hThinLines)
                     thisLine = handle(hThinLines(lineIdx));
-                    thisLine.LineWidth = thisLine.LineWidth / 10;
+                    thisLine.LineWidth = lineWd(lineWdIdx(lineIdx));
                 end
 
                 % Compare the original and the new EPS files and correct the original stream's LineWidths
-                fstrm_new = read_write_entire_textfile(name);
-                idx = 500;  % skip heading with its possibly-different timestamp
-                markerStr = sprintf('10.0 ML\nN');
-                markerLen = length(markerStr);
-                while ~isempty(idx) && idx < length(fstrm)
-                    lastIdx = min(length(fstrm), length(fstrm_new));
-                    delta = fstrm(idx+1:lastIdx) - fstrm_new(idx+1:lastIdx);
-                    idx = idx + find(delta,1);
-                    if ~isempty(idx) && ...
-                            isequal(fstrm(idx-markerLen+1:idx), markerStr) && ...
-                            ~isempty(regexp(fstrm_new(idx-markerLen+1:idx+12),'10.0 ML\n[\d\.]+ LW\nN')) %#ok<RGXP1>
-                        value = str2double(regexprep(fstrm_new(idx:idx+12),' .*',''));
-                        if isnan(value), break; end  % something's wrong... - bail out
-                        newStr = sprintf('%0.3f LW\n',value/10);
-                        fstrm = [fstrm(1:idx-1) newStr fstrm(idx:end)];
-                        idx = idx + 12;
-                    else
-                        break;
+                fstrm = read_write_entire_textfile(name);
+                for lwdIdx = 1:length(lineWd) 
+                    markerStr = sprintf('%.2f LW\n', lwdIdx+0.42);
+                    markerLen= length(markerStr);
+                    newVal= sprintf('%.3f LW\n', lineWd(lwdIdx));
+                    pos= strfind(fstrm,markerStr);
+                    while ~isempty(pos) 
+                        fstrm = [fstrm(1:pos(1)-1) newVal fstrm((pos(1)+markerLen):end)];
+                        pos= strfind(fstrm,markerStr);
                     end
                 end
             end
-            %}
-
             % This is much faster although less accurate: fix all non-gray lines to have a LineWidth of 0.75 (=1 LW)
             % Note: This will give incorrect LineWidth of 075 for lines having LineWidth<0.75, as well as for non-gray grid-lines (if present)
             %       However, in practice these edge-cases are very rare indeed, and the difference in LineWidth should not be noticeable
             %fstrm = regexprep(fstrm, '([CR]C\n2 setlinecap\n1 LJ)\nN', '$1\n1 LW\nN');
             % This is faster (the original regexprep could take many seconds when the axes contains many lines):
             fstrm = strrep(fstrm, sprintf('\n2 setlinecap\n1 LJ\nN'), sprintf('\n2 setlinecap\n1 LJ\n1 LW\nN'));
-        end
+            % Convert miter joins to line joins
+            %fstrm = regexprep(fstrm, '\n10.0 ML\n', '\n1 LJ\n');
+            % This is faster (the original regexprep could take many seconds when the axes contains many lines):
+            fstrm = strrep(fstrm, sprintf('\n10.0 ML\n'), sprintf('\n1 LJ\n'));
+            % Restore colors for transparent patches and apply the
+            % setopacityalpha setting in the EPS file (issue #108)
+            [~,fstrm] = eps_maintainAlpha(fig, fstrm, origAlphaColors);
+      end
     catch err
         fprintf(2, 'Error fixing LineWidths in EPS file: %s\n at %s:%d\n', err.message, err.stack(1).file, err.stack(1).line);
+  
     end
 
     % Reset the font and line colors
